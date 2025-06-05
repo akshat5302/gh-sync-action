@@ -9,13 +9,19 @@ jobs:
   sync-to-frontend-dev:
     runs-on: ubuntu-latest
     
+    # Explicitly request permissions
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Use built-in GITHUB_TOKEN - no extra credentials needed
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT token if GITHUB_TOKEN doesn't have enough permissions
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
       
       - name: Configure Git as GitHub Actions Bot
         run: |
@@ -24,7 +30,7 @@ jobs:
       
       - name: Set up GitHub CLI with bot token
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+          echo "${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}" | gh auth login --with-token
       
       - name: Fetch all branches
         run: |
