@@ -1,0 +1,280 @@
+name: Sync Develop to Frontend-dev
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  sync-to-frontend-dev:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use built-in GITHUB_TOKEN - no extra credentials needed
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure Git as GitHub Actions Bot
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Set up GitHub CLI with bot token
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+      
+      - name: Fetch all branches
+        run: |
+          git fetch origin
+          git fetch --all
+      
+      - name: Check if frontend-dev branch exists
+        run: |
+          if ! git show-ref --verify --quiet refs/remotes/origin/frontend-dev; then
+            echo "Creating frontend-dev branch from develop..."
+            git checkout -b frontend-dev
+            git push origin frontend-dev
+            echo "✅ Created frontend-dev branch"
+          fi
+      
+      - name: Checkout frontend-dev branch
+        run: |
+          git checkout frontend-dev
+          git pull origin frontend-dev
+      
+      - name: Get latest commit details from develop
+        id: commit-info
+        run: |
+          git fetch origin develop
+          COMMIT_MESSAGE=$(git log -1 --pretty=format:"%s" origin/develop)
+          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an <%ae>" origin/develop)
+          COMMIT_HASH=$(git log -1 --pretty=format:"%h" origin/develop)
+          COMMIT_FULL_HASH=$(git log -1 --pretty=format:"%H" origin/develop)
+          
+          echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+          echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "commit_full_hash=$COMMIT_FULL_HASH" >> $GITHUB_OUTPUT
+          
+          echo "📋 Latest develop commit: $COMMIT_HASH - $COMMIT_MESSAGE"
+      
+      - name: Check for changes between branches
+        id: changes
+        run: |
+          # Check if there are any differences
+          if git diff --quiet HEAD origin/develop; then
+            echo "No new changes to sync"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found changes to sync"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            
+            # Get summary of changes
+            CHANGED_FILES=$(git diff --name-only HEAD origin/develop | wc -l)
+            echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Merge develop into frontend-dev
+        if: steps.changes.outputs.has_changes == 'true'
+        id: merge
+        run: |
+          echo "🔄 Syncing changes from develop to frontend-dev..."
+          
+          # Try to merge develop into frontend-dev
+          if git merge origin/develop --no-ff -m "🤖 Auto-sync: Pull develop changes into frontend-dev
+
+          Latest commit: ${{ steps.commit-info.outputs.commit_hash }} - ${{ steps.commit-info.outputs.commit_message }}
+          Author: ${{ steps.commit-info.outputs.commit_author }}
+          Files changed: ${{ steps.changes.outputs.changed_files }}
+          
+          Synced by: github-actions[bot]
+          Workflow: ${{ github.workflow }}
+          Run: ${{ github.run_id }}"; then
+            
+            echo "✅ Successfully merged develop into frontend-dev"
+            echo "merge_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Merge conflicts detected"
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            
+            # Get list of conflicted files
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U | tr '\n' ', ' | sed 's/,$//')
+            echo "conflicted_files=$CONFLICTED_FILES" >> $GITHUB_OUTPUT
+            
+            echo "Conflicted files: $CONFLICTED_FILES"
+            
+            # Abort the merge
+            git merge --abort
+          fi
+      
+      - name: Push changes to frontend-dev
+        if: steps.changes.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'true'
+        run: |
+          git push origin frontend-dev
+          echo "✅ Successfully pushed changes to frontend-dev"
+      
+      - name: Create pull request for conflict resolution
+        if: steps.changes.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'false'
+        id: conflict-pr
+        run: |
+          # Create a temporary branch for the conflicted merge
+          TEMP_BRANCH="bot/sync-develop-to-frontend-dev-$(date +%s)"
+          echo "temp_branch=$TEMP_BRANCH" >> $GITHUB_OUTPUT
+          
+          git checkout -b $TEMP_BRANCH
+          
+          # Attempt merge again to preserve conflict markers
+          git merge origin/develop --no-edit || true
+          
+          # Stage all changes (including conflicts)
+          git add .
+          git commit -m "🤖 AUTO: Sync develop to frontend-dev (CONFLICTS NEED RESOLUTION)
+
+          ⚠️ This commit contains merge conflicts that need manual resolution.
+          
+          Conflicted files: ${{ steps.merge.outputs.conflicted_files }}
+          Original commit: ${{ steps.commit-info.outputs.commit_hash }} - ${{ steps.commit-info.outputs.commit_message }}
+          
+          Please resolve conflicts and merge this PR."
+          
+          # Push temp branch
+          git push origin $TEMP_BRANCH
+          
+          # Create PR using GitHub CLI
+          PR_URL=$(gh pr create \
+            --title "🤖 [AUTO-SYNC] Resolve Conflicts: develop → frontend-dev" \
+            --body "## 🚨 Automatic Sync Conflicts Detected
+
+          The GitHub Actions bot attempted to sync \`develop\` to \`frontend-dev\` but encountered merge conflicts.
+
+          ### 📋 Details
+          - **Source:** \`develop\` 
+          - **Target:** \`frontend-dev\`
+          - **Conflicted Files:** \`${{ steps.merge.outputs.conflicted_files }}\`
+          - **Trigger Commit:** [\`${{ steps.commit-info.outputs.commit_hash }}\`](https://github.com/${{ github.repository }}/commit/${{ steps.commit-info.outputs.commit_full_hash }})
+          - **Commit Message:** ${{ steps.commit-info.outputs.commit_message }}
+          - **Original Author:** ${{ steps.commit-info.outputs.commit_author }}
+
+          ### 🔧 How to Resolve
+          1. **Checkout this branch:**
+             \`\`\`bash
+             git fetch origin
+             git checkout $TEMP_BRANCH
+             \`\`\`
+
+          2. **Resolve conflicts in your editor** (look for \`<<<<<<<\`, \`=======\`, \`>>>>>>>\` markers)
+
+          3. **Commit resolved changes:**
+             \`\`\`bash
+             git add .
+             git commit -m \"Resolve merge conflicts from develop sync\"
+             git push origin $TEMP_BRANCH
+             \`\`\`
+
+          4. **Merge this PR** to complete the sync
+
+          ### 🤖 Bot Info
+          - Created by: github-actions[bot]
+          - Workflow: [${{ github.workflow }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - Auto-generated on: $(date)" \
+            --base frontend-dev \
+            --head $TEMP_BRANCH \
+            --label "bot,sync-conflict,frontend,needs-resolution" \
+            --assignee "${{ github.actor }}")
+          
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "🔗 Created conflict resolution PR: $PR_URL"
+      
+      - name: Create success summary
+        if: steps.changes.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'true'
+        run: |
+          echo "## ✅ Sync Completed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source:** \`develop\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** \`frontend-dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files Changed:** ${{ steps.changes.outputs.changed_files }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Commit:** [\`${{ steps.commit-info.outputs.commit_hash }}\`](https://github.com/${{ github.repository }}/commit/${{ steps.commit-info.outputs.commit_full_hash }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit Message:** ${{ steps.commit-info.outputs.commit_message }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Original Author:** ${{ steps.commit-info.outputs.commit_author }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Synced By:** github-actions[bot] 🤖" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date)" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Create conflict summary
+        if: steps.changes.outputs.has_changes == 'true' && steps.merge.outputs.merge_success == 'false'
+        run: |
+          echo "## ⚠️ Sync Conflicts Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source:** \`develop\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** \`frontend-dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Conflict Resolution PR Created" >> $GITHUB_STEP_SUMMARY
+          echo "- **Conflicted Files:** \`${{ steps.merge.outputs.conflicted_files }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Resolution PR:** ${{ steps.conflict-pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger Commit:** [\`${{ steps.commit-info.outputs.commit_hash }}\`](https://github.com/${{ github.repository }}/commit/${{ steps.commit-info.outputs.commit_full_hash }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bot:** github-actions[bot] 🤖" >> $GITHUB_STEP_SUMMARY
+      
+      - name: No changes summary
+        if: steps.changes.outputs.has_changes == 'false'
+        run: |
+          echo "## ℹ️ No Changes to Sync" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The \`frontend-dev\` branch is already up to date with \`develop\`." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Checked by:** github-actions[bot] 🤖" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date)" >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Auto-close resolved conflict PRs
+  cleanup-resolved-conflicts:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/frontend-dev'
+    
+    steps:
+      - name: Close resolved sync PRs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Find open PRs with sync-conflict label targeting frontend-dev
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: 'frontend-dev'
+            });
+            
+            for (const pr of prs) {
+              if (pr.labels.some(label => label.name === 'sync-conflict')) {
+                // Check if the PR branch still exists and if changes are already merged
+                try {
+                  const { data: comparison } = await github.rest.repos.compareCommits({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    base: 'frontend-dev',
+                    head: pr.head.sha
+                  });
+                  
+                  if (comparison.status === 'identical' || comparison.behind_by === 0) {
+                    // Changes are already in frontend-dev, close the PR
+                    await github.rest.pulls.update({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: pr.number,
+                      state: 'closed'
+                    });
+                    
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: pr.number,
+                      body: '🤖 **Auto-closed:** The sync conflicts have been resolved and changes are now in `frontend-dev`. This PR is no longer needed.'
+                    });
+                    
+                    console.log(`Closed resolved sync PR #${pr.number}`);
+                  }
+                } catch (error) {
+                  console.log(`Could not check PR #${pr.number}: ${error.message}`);
+                }
+              }
+            }
